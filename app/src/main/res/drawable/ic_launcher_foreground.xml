@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Glowing Eagle Instinct Apex Emblem -->
+    <!-- Center Eye / Diamond Core -->
+    <path
+        android:fillColor="#00FF88"
+        android:pathData="M54,42 L63,54 L54,66 L45,54 Z" />
+    <path
+        android:fillColor="#00E5FF"
+        android:pathData="M54,47 L59,54 L54,61 L49,54 Z" />
+
+    <!-- Left Wing Feathers / Instinct Neural Flairs -->
+    <path
+        android:fillColor="#00FF88"
+        android:pathData="M50,33 L32,46 L40,51 L48,43 Z" />
+    <path
+        android:fillColor="#00E5FF"
+        android:pathData="M46,45 L26,56 L34,61 L44,53 Z" />
+    <path
+        android:fillColor="#00FF88"
+        android:pathData="M43,55 L24,67 L34,71 L42,62 Z" />
+
+    <!-- Right Wing Feathers / Instinct Neural Flairs -->
+    <path
+        android:fillColor="#00FF88"
+        android:pathData="M58,33 L76,46 L68,51 L60,43 Z" />
+    <path
+        android:fillColor="#00E5FF"
+        android:pathData="M62,45 L82,56 L74,61 L64,53 Z" />
+    <path
+        android:fillColor="#00FF88"
+        android:pathData="M65,55 L84,67 L74,71 L66,62 Z" />
+
+    <!-- Top Crown / Eagle Crest -->
+    <path
+        android:fillColor="#00FF88"
+        android:pathData="M54,26 L60,37 L48,37 Z" />
+    <!-- Bottom Talon / Focus V-Point -->
+    <path
+        android:fillColor="#00E5FF"
+        android:pathData="M54,78 L60,68 L48,68 Z" />
+</vector>

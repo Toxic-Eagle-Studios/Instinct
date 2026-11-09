@@ -1,0 +1,184 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Catch-all deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidUserProfile(data, uid) {
+      return data.userId == uid &&
+        data.displayName is string && data.displayName.size() > 0 && data.displayName.size() <= 100 &&
+        data.email is string && data.email.size() <= 200 &&
+        data.createdAt is timestamp && data.createdAt <= request.time &&
+        data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidReminder(data, uid) {
+      return data.userId == uid &&
+        data.id is string && data.id.size() > 0 && data.id.size() <= 128 &&
+        data.title is string && data.title.size() > 0 && data.title.size() <= 500 &&
+        data.triggerActivity is string && data.triggerActivity.size() <= 500 &&
+        data.recurrence in ['every_time', 'next_time_only', 'until_completed'] &&
+        data.isCompleted is bool &&
+        (!('category' in data) || (data.category is string && data.category.size() <= 100)) &&
+        (!('relatedPeople' in data) || data.relatedPeople is list) &&
+        (!('relatedLocations' in data) || data.relatedLocations is list) &&
+        (!('keywords' in data) || data.keywords is list) &&
+        data.createdAt is timestamp && data.createdAt <= request.time &&
+        data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidPreference(data, uid) {
+      return data.userId == uid &&
+        data.id is string && data.id.size() > 0 && data.id.size() <= 128 &&
+        data.title is string && data.title.size() > 0 && data.title.size() <= 300 &&
+        data.category is string && data.category.size() > 0 && data.category.size() <= 100 &&
+        data.description is string && data.description.size() > 0 && data.description.size() <= 2000 &&
+        (!('details' in data) || (data.details is string && data.details.size() <= 5000)) &&
+        (!('tags' in data) || data.tags is list) &&
+        (!('photoUrl' in data) || (data.photoUrl is string && data.photoUrl.size() <= 1000)) &&
+        data.createdAt is timestamp && data.createdAt <= request.time &&
+        data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidFix(data, uid) {
+      return data.userId == uid &&
+        data.id is string && data.id.size() > 0 && data.id.size() <= 128 &&
+        data.problemSummary is string && data.problemSummary.size() > 0 && data.problemSummary.size() <= 500 &&
+        data.whatHappened is string && data.whatHappened.size() > 0 && data.whatHappened.size() <= 1000 &&
+        data.bestFix is string && data.bestFix.size() > 0 && data.bestFix.size() <= 2000 &&
+        (!('steps' in data) || data.steps is list) &&
+        (!('toolsNeeded' in data) || data.toolsNeeded is list) &&
+        (!('alternativeFix' in data) || (data.alternativeFix is string && data.alternativeFix.size() <= 2000)) &&
+        (!('category' in data) || (data.category is string && data.category.size() <= 100)) &&
+        data.isVerifiedWorking is bool &&
+        data.createdAt is timestamp && data.createdAt <= request.time &&
+        data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidMemoryItem(data, uid) {
+      return data.userId == uid &&
+        data.id is string && data.id.size() > 0 && data.id.size() <= 128 &&
+        data.type in ['reminder', 'preference', 'fix'] &&
+        data.title is string && data.title.size() > 0 && data.title.size() <= 500 &&
+        (!('content' in data) || (data.content is string && data.content.size() <= 5000)) &&
+        (!('tags' in data) || data.tags is list) &&
+        (!('triggerActivity' in data) || (data.triggerActivity is string && data.triggerActivity.size() <= 500)) &&
+        (!('relatedPeople' in data) || data.relatedPeople is list) &&
+        (!('relatedLocations' in data) || data.relatedLocations is list) &&
+        (!('recurrence' in data) || data.recurrence in ['every_time', 'next_time_only', 'until_completed']) &&
+        (!('isCompleted' in data) || data.isCompleted is bool) &&
+        (!('category' in data) || (data.category is string && data.category.size() <= 100)) &&
+        (!('details' in data) || (data.details is string && data.details.size() <= 5000)) &&
+        (!('photoUrl' in data) || (data.photoUrl is string && data.photoUrl.size() <= 1000)) &&
+        (!('problemSummary' in data) || (data.problemSummary is string && data.problemSummary.size() <= 500)) &&
+        (!('whatHappened' in data) || (data.whatHappened is string && data.whatHappened.size() <= 1000)) &&
+        (!('bestFix' in data) || (data.bestFix is string && data.bestFix.size() <= 2000)) &&
+        (!('steps' in data) || data.steps is list) &&
+        (!('toolsNeeded' in data) || data.toolsNeeded is list) &&
+        (!('alternativeFix' in data) || (data.alternativeFix is string && data.alternativeFix.size() <= 2000)) &&
+        (!('isVerifiedWorking' in data) || data.isVerifiedWorking is bool) &&
+        data.createdAt is timestamp && data.createdAt <= request.time &&
+        data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    // User Profile Document
+    match /users/{userId} {
+      allow get: if isOwner(userId) && isValidId(userId);
+      allow create: if isOwner(userId) && isValidId(userId) &&
+        incoming().keys().hasAll(['userId', 'displayName', 'email', 'createdAt', 'updatedAt']) &&
+        incoming().keys().hasOnly(['userId', 'displayName', 'email', 'createdAt', 'updatedAt']) &&
+        isValidUserProfile(incoming(), userId);
+      allow update: if isOwner(userId) && isValidId(userId) &&
+        incoming().userId == existing().userId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'email', 'updatedAt']) &&
+        isValidUserProfile(incoming(), userId);
+      allow delete: if isOwner(userId) && isValidId(userId);
+
+      // Reminders subcollection
+      match /reminders/{reminderId} {
+        allow get, list: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidId(reminderId) &&
+          incoming().keys().hasAll(['id', 'userId', 'title', 'triggerActivity', 'recurrence', 'isCompleted', 'createdAt', 'updatedAt']) &&
+          incoming().keys().hasOnly(['id', 'userId', 'title', 'triggerActivity', 'relatedPeople', 'relatedLocations', 'keywords', 'recurrence', 'isCompleted', 'category', 'createdAt', 'updatedAt']) &&
+          isValidReminder(incoming(), userId);
+        allow update: if isOwner(userId) && isValidId(reminderId) &&
+          incoming().id == existing().id &&
+          incoming().userId == existing().userId &&
+          incoming().createdAt == existing().createdAt &&
+          isValidReminder(incoming(), userId);
+        allow delete: if isOwner(userId) && isValidId(reminderId);
+      }
+
+      // Preferences subcollection
+      match /preferences/{preferenceId} {
+        allow get, list: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidId(preferenceId) &&
+          incoming().keys().hasAll(['id', 'userId', 'title', 'category', 'description', 'createdAt', 'updatedAt']) &&
+          incoming().keys().hasOnly(['id', 'userId', 'title', 'category', 'description', 'details', 'tags', 'photoUrl', 'createdAt', 'updatedAt']) &&
+          isValidPreference(incoming(), userId);
+        allow update: if isOwner(userId) && isValidId(preferenceId) &&
+          incoming().id == existing().id &&
+          incoming().userId == existing().userId &&
+          incoming().createdAt == existing().createdAt &&
+          isValidPreference(incoming(), userId);
+        allow delete: if isOwner(userId) && isValidId(preferenceId);
+      }
+
+      // Fixes subcollection
+      match /fixes/{fixId} {
+        allow get, list: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidId(fixId) &&
+          incoming().keys().hasAll(['id', 'userId', 'problemSummary', 'whatHappened', 'bestFix', 'isVerifiedWorking', 'createdAt', 'updatedAt']) &&
+          incoming().keys().hasOnly(['id', 'userId', 'problemSummary', 'whatHappened', 'bestFix', 'steps', 'toolsNeeded', 'alternativeFix', 'isVerifiedWorking', 'category', 'createdAt', 'updatedAt']) &&
+          isValidFix(incoming(), userId);
+        allow update: if isOwner(userId) && isValidId(fixId) &&
+          incoming().id == existing().id &&
+          incoming().userId == existing().userId &&
+          incoming().createdAt == existing().createdAt &&
+          isValidFix(incoming(), userId);
+        allow delete: if isOwner(userId) && isValidId(fixId);
+      }
+
+      // Unified single shared memories collection
+      match /memories/{memoryId} {
+        allow get, list: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidId(memoryId) &&
+          incoming().keys().hasAll(['id', 'userId', 'type', 'title', 'createdAt', 'updatedAt']) &&
+          incoming().keys().hasOnly(['id', 'userId', 'type', 'title', 'content', 'tags', 'triggerActivity', 'relatedPeople', 'relatedLocations', 'recurrence', 'isCompleted', 'category', 'details', 'photoUrl', 'problemSummary', 'whatHappened', 'bestFix', 'steps', 'toolsNeeded', 'alternativeFix', 'isVerifiedWorking', 'createdAt', 'updatedAt']) &&
+          isValidMemoryItem(incoming(), userId);
+        allow update: if isOwner(userId) && isValidId(memoryId) &&
+          incoming().id == existing().id &&
+          incoming().userId == existing().userId &&
+          incoming().type == existing().type &&
+          incoming().createdAt == existing().createdAt &&
+          isValidMemoryItem(incoming(), userId);
+        allow delete: if isOwner(userId) && isValidId(memoryId);
+      }
+    }
+  }
+}
