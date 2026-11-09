@@ -1,0 +1,31 @@
+BUILD A REAL, RUNNABLE APPLICATION CALLED INSTINCT. This is the actual app concept, not a landing page or mockup.
+
+PLATFORM: Choose WEB APP (React frontend + Node backend), mobile-first for Samsung Galaxy S25 Ultra and MacBook. Do not choose native Android yet, because this version requires server-side Gemini and eventual cloud storage. Prefer clean JS/TypeScript, accessible styling, componentized code, and no placeholder buttons.
+
+PRODUCT: INSTINCT = ONE PERSONAL SECOND BRAIN combining three connected abilities:
+1. WHILE YOU'RE AT IT: Contextual reminders. "Remind me to ask Dad about Friday" stores a reminder tagged to Dad. When the user later types or says "I'm heading to Dad's", show the saved Dad reminder, without GPS tracking.
+2. EXACTLY / REMIND ME: One searchable memory for facts, normal orders, preferences, steps, past solutions and reminders. "What's my normal pizza order?" must return a previously saved pizza preference (or admit nothing was saved). Allow viewing, correction, deletion, completion, export/import.
+3. UNDO IRL: "I accidentally deleted something" launches a clear, careful recovery guide. Allow saving the successful solution into shared memory for later retrieval.
+
+SCREEN / UI: INSTINCT logo/name, one universal capture field, optional voice transcription and photo capture, contextual results section, four compact tabs (Home, Memory, Undo IRL, Settings), edit/delete, search filters (reminder/preference/solution/note), local data privacy controls. Design: black/graphite with restrained acid-green accents, crisp premium typography, very simple to understand within five seconds. Phone-first, usable with touch and keyboard, no giant marketing page.
+
+FUNCTIONAL REQUIREMENTS:
+- Working app on first preview, even without Firebase or Gemini. Store data in localStorage initially. Do not erase saved data on reload. Use real working interactions.
+- Actual CREATE/READ/UPDATE/DELETE for memory records; each has id, type, title, content, context, tags, createdAt, optional due date, completion, optional compressed image. Add real JSON import/export.
+- Working deterministic fallback classifier for save vs recall vs situational-context vs recovery, so all four flows can be tested offline.
+- Use Gemini only from server routes via secret GEMINI_API_KEY, never expose API keys in browser source. Route should generate valid structured JSON intent. Avoid inventing memories or saying a record was saved until data persistence succeeds.
+- Add optional Firebase Auth (Google) and Firestore under users/{uid}/memories/{memoryId}, protected by owner-only security rules. If not configured, keep working in local-only mode. Provide explicit import/copy from device memory to account, no silent data loss.
+- Input methods: typed text; microphone via browser speech-recognition where supported; camera/gallery photo with compression, clear permission/error handling and fallback text input.
+- No always-on microphone or background location tracking. Proactive prompts should be triggered by provided context, not by secretly collecting location.
+- Time reminders can be stored. Do not claim reliable background notifications without a real push-notification backend; show this limitation clearly.
+- Handle network errors and empty searches. Confirm destructive deletion. Do not put user data into development sample records without their action.
+- Add a README with exact setup, run and deploy instructions. Ensure the preview builds and check for runtime errors.
+
+TEST THESE FLOWS:
+A. Enter "Remind me to ask Dad about Friday"; verify it saves.
+B. Enter "I'm heading to Dad's"; verify the saved reminder appears.
+C. Save "My normal pizza order is pepperoni and mushrooms" then ask "What's my normal pizza order?"; verify real retrieval.
+D. Enter "I accidentally deleted a file"; show practical recovery guidance and allow saving it.
+E. Reload; verify records persist. Edit, complete, delete, export and reimport a record.
+
+DELIVERY: Generate the COMPLETE functional source files and RUN the app in preview. Do not respond with a conceptual plan or prototype-only page. Use the supplied project files as the implementation reference when imported.

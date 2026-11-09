@@ -1,0 +1,26 @@
+{
+  "name": "instinct-second-brain",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k \"npm:dev:api\" \"npm:dev:web\"",
+    "dev:web": "vite --host 0.0.0.0",
+    "dev:api": "node server.js",
+    "build": "vite build",
+    "start": "NODE_ENV=production node server.js",
+    "check": "node --check server.js && node --check src/logic.js"
+  },
+  "dependencies": {
+    "@google/genai": "^1.30.0",
+    "express": "^5.1.0",
+    "firebase": "^12.4.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^5.1.0",
+    "concurrently": "^9.2.1",
+    "vite": "^7.2.0"
+  }
+}

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Copy locally to app/src/main/res/values/firebase_applet_config.xml. -->
+<resources>
+    <string name="firestore_database_id" translatable="false">YOUR_EXISTING_FIRESTORE_DATABASE_ID</string>
+    <!-- If the existing release App Check setup uses a reCAPTCHA site key: -->
+    <!-- <string name="recaptcha_site_key" translatable="false">YOUR_RECAPTCHA_SITE_KEY</string> -->
+</resources>
