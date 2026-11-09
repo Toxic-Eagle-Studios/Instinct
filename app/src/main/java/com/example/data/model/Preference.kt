@@ -1,13 +1,12 @@
 package com.example.data.model
 
-import com.google.firebase.firestore.DocumentId
 import com.google.firebase.firestore.IgnoreExtraProperties
 import com.google.firebase.firestore.ServerTimestamp
 import java.util.Date
 
 @IgnoreExtraProperties
 data class Preference(
-  @DocumentId val id: String = "",
+  val id: String = "",
   val userId: String = "",
   val title: String = "",
   val category: String = "Food & Drinks",

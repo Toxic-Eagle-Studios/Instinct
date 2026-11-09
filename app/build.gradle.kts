@@ -53,7 +53,9 @@ android {
     debug {
       // Do not remove or modify this signingConfig assignment. It is necessary for Android apps in
       // AI Studio.
-      signingConfig = signingConfigs.getByName("debugConfig")
+      if (rootProject.file("debug.keystore").exists()) {
+        signingConfig = signingConfigs.getByName("debugConfig")
+      }
     }
   }
   compileOptions {
@@ -152,4 +154,17 @@ dependencies {
   debugImplementation(libs.androidx.compose.ui.tooling)
   "ksp"(libs.androidx.room.compiler)
   "ksp"(libs.moshi.kotlin.codegen)
+}
+
+// Keep Room's generated schema history in version control for future migration validation.
+class RoomSchemaArgProvider(
+  @get:InputDirectory
+  @get:PathSensitive(PathSensitivity.RELATIVE)
+  val schemaDir: File
+) : org.gradle.process.CommandLineArgumentProvider {
+  override fun asArguments(): Iterable<String> = listOf("room.schemaLocation=${schemaDir.path}")
+}
+
+ksp {
+  arg(RoomSchemaArgProvider(file("schemas")))
 }

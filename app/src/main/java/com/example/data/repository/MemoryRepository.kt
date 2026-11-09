@@ -2,7 +2,7 @@ package com.example.data.repository
 
 import android.content.Context
 import android.util.Log
-import com.example.R
+import com.example.util.configuredFirestoreDatabaseId
 import com.example.data.local.InstinctDatabase
 import com.example.data.local.UnifiedMemoryDao
 import com.example.data.local.UnifiedMemoryEntity
@@ -11,13 +11,12 @@ import com.example.data.model.UnifiedMemoryItem
 import com.example.util.OperationType
 import com.example.util.handleFirestoreError
 import com.google.firebase.Firebase
-import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.auth
-import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.Query
+import com.google.firebase.firestore.Source
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
@@ -112,7 +111,7 @@ class DefaultMemoryRepository(
   companion object {
     private fun getFirestoreSafe(context: Context): FirebaseFirestore? {
       return try {
-        val dbId = context.applicationContext.getString(R.string.firestore_database_id)
+        val dbId = context.configuredFirestoreDatabaseId()
         FirebaseFirestore.getInstance(dbId)
       } catch (e: Exception) {
         null
@@ -211,16 +210,16 @@ class DefaultMemoryRepository(
     val local = localDao.getMemoryById(memoryId, userId)
     if (local != null) return@withContext local.toMemoryEntry()
 
+    if (localDao.getPendingDeleteMemories(userId).any { it.id == memoryId }) return@withContext null
     val db = firestore
     if (db != null && isUserSignedIn() && getCurrentUserId() == userId) {
       try {
         val snap = db.collection("users").document(userId).collection("memories").document(memoryId).get().await()
         if (snap.exists()) {
-          val item = snap.toObject(UnifiedMemoryItem::class.java)
+          val item = snap.toObject(UnifiedMemoryItem::class.java)?.copy(id = snap.id)
           if (item != null) {
-            val entry = MemoryEntry.fromUnifiedMemoryItem(item)
-            localDao.insertMemory(UnifiedMemoryEntity.fromMemoryEntry(entry, isDirty = false, pendingDelete = false))
-            return@withContext entry
+            reconcileRemoteSnapshot(userId, listOf(item))
+            return@withContext localDao.getMemoryById(memoryId, userId)?.toMemoryEntry()
           }
         }
       } catch (e: Exception) {
@@ -246,7 +245,7 @@ class DefaultMemoryRepository(
       }
 
       // Preserve original createdAt if this record already exists locally
-      val existingLocal = localDao.getMemoryById(memoryId, uid)
+      val existingLocal = localDao.getMemoryByIdAnyUser(memoryId)?.takeIf { it.userId == uid }
       val now = System.currentTimeMillis()
       val preservedCreatedAt = existingLocal?.createdAt ?: minOf(normalized.timestamp.time, now)
 
@@ -259,7 +258,7 @@ class DefaultMemoryRepository(
         createdAt = preservedCreatedAt,
         updatedAt = maxOf(normalized.timestamp.time, now)
       )
-      localDao.insertMemory(entity)
+      localDao.saveLocalMemories(listOf(entity))
 
       // Step 2: Asynchronous Remote Sync to Firestore
       val db = firestore
@@ -267,7 +266,7 @@ class DefaultMemoryRepository(
         repositoryScope.launch {
           try {
             pushEntityToFirestorePreservingCreatedAt(db, uid, entity)
-            localDao.markMemorySynced(memoryId, uid)
+            localDao.markMemorySyncedIfUnchanged(entity)
             _syncStatus.value = SyncStatus.Synced(System.currentTimeMillis(), localDao.getMemoryCount(uid))
           } catch (e: Exception) {
             Log.e(TAG, "Remote Firestore sync failed for memory $memoryId; remains queued in Room outbox", e)
@@ -295,7 +294,7 @@ class DefaultMemoryRepository(
       val entities = entries.map { entry ->
         val effectiveUid = if (entry.userId.isNotBlank()) entry.userId else uid
         val effectiveId = entry.id.ifBlank { UUID.randomUUID().toString() }
-        val existingLocal = localDao.getMemoryById(effectiveId, effectiveUid)
+        val existingLocal = localDao.getMemoryByIdAnyUser(effectiveId)?.takeIf { it.userId == effectiveUid }
         val preservedCreatedAt = existingLocal?.createdAt ?: minOf(entry.timestamp.time, now)
 
         val norm = when (entry) {
@@ -310,7 +309,7 @@ class DefaultMemoryRepository(
       }
 
       // Bulk local insert marked dirty until remote commit succeeds
-      localDao.insertMemories(entities)
+      localDao.saveLocalMemories(entities)
 
       // Remote bulk sync
       val db = firestore
@@ -319,7 +318,7 @@ class DefaultMemoryRepository(
           try {
             entities.forEach { entity ->
               pushEntityToFirestorePreservingCreatedAt(db, entity.userId, entity)
-              localDao.markMemorySynced(entity.id, entity.userId)
+              localDao.markMemorySyncedIfUnchanged(entity)
             }
             _syncStatus.value = SyncStatus.Synced(System.currentTimeMillis(), localDao.getMemoryCount(uid))
           } catch (e: Exception) {
@@ -343,18 +342,18 @@ class DefaultMemoryRepository(
       val now = System.currentTimeMillis()
       // 1. Mark tombstone locally in Room so UI immediately hides the item (`pendingDelete = 1`),
       //    while preserving the tombstone for remote deletion replay if offline.
-      localDao.markMemoryPendingDelete(memoryId, userId, now)
+      val tombstone = localDao.stageMemoryDeletion(UnifiedMemoryEntity.fromModel(
+        UnifiedMemoryItem(id = memoryId, userId = userId, createdAt = Date(now), updatedAt = Date(now)),
+        isDirty = true,
+        pendingDelete = true
+      ))
 
       // 2. Delete remotely from Firestore if online & authenticated
       val db = firestore
       if (db != null && isUserSignedIn() && getCurrentUserId() == userId) {
         repositoryScope.launch {
           try {
-            db.collection("users").document(userId).collection("memories").document(memoryId)
-              .delete()
-              .await()
-            // Remote delete confirmed -> physically remove the tombstone row
-            localDao.deleteMemoryById(memoryId, userId)
+            deleteTombstoneFromFirestore(db, tombstone)
             _syncStatus.value = SyncStatus.Synced(System.currentTimeMillis(), localDao.getMemoryCount(userId))
           } catch (e: Exception) {
             Log.e(TAG, "Failed to delete remote memory document $memoryId; tombstone retained for retry", e)
@@ -389,7 +388,7 @@ class DefaultMemoryRepository(
               val entity = localDao.getMemoryById(memoryId, userId)
               if (entity != null) {
                 pushEntityToFirestorePreservingCreatedAt(db, userId, entity)
-                localDao.markMemorySynced(memoryId, userId)
+                localDao.markMemorySyncedIfUnchanged(entity)
               }
             } catch (e: Exception) {
               Log.w(TAG, "Failed to sync category update to Firestore; kept dirty in Room", e)
@@ -421,7 +420,7 @@ class DefaultMemoryRepository(
             repositoryScope.launch {
               try {
                 pushEntityToFirestorePreservingCreatedAt(db, userId, updated)
-                localDao.markMemorySynced(memoryId, userId)
+                localDao.markMemorySyncedIfUnchanged(updated)
               } catch (e: Exception) {
                 Log.w(TAG, "Failed to sync reminder toggle to Firestore; kept dirty in Room", e)
               }
@@ -453,7 +452,7 @@ class DefaultMemoryRepository(
             repositoryScope.launch {
               try {
                 pushEntityToFirestorePreservingCreatedAt(db, userId, updated)
-                localDao.markMemorySynced(memoryId, userId)
+                localDao.markMemorySyncedIfUnchanged(updated)
               } catch (e: Exception) {
                 Log.w(TAG, "Failed to sync fix verification to Firestore; kept dirty in Room", e)
               }
@@ -470,24 +469,41 @@ class DefaultMemoryRepository(
 
   override suspend fun clearAllMemories(userId: String): Result<Unit> = withContext(ioDispatcher) {
     try {
-      localDao.deleteAllByUserId(userId)
-
-      val db = firestore
-      if (db != null && isUserSignedIn() && getCurrentUserId() == userId) {
-        try {
-          val snapshot = db.collection("users").document(userId).collection("memories").get().await()
-          val batch = db.batch()
-          snapshot.documents.forEach { batch.delete(it.reference) }
-          batch.commit().await()
-        } catch (e: Exception) {
-          Log.w(TAG, "Failed to clear remote Firestore memories", e)
-        }
+      if (userId == "guest_user") {
+        localDao.deleteAllByUserId(userId)
+        _syncStatus.value = SyncStatus.Synced(System.currentTimeMillis(), 0)
+        return@withContext Result.success(Unit)
       }
-      _syncStatus.value = SyncStatus.Synced(System.currentTimeMillis(), 0)
+
+      // Hide the requested rows, retaining their payload and deletion intent until cloud success.
+      val tombstones = localDao.markAllMemoriesPendingDelete(userId, System.currentTimeMillis())
+      val db = firestore
+      if (db == null || !isUserSignedIn() || getCurrentUserId() != userId) {
+        _syncStatus.value = SyncStatus.Offline
+        return@withContext Result.failure(IllegalStateException("Deletion queued locally; reconnect to finish clearing cloud memories"))
+      }
+
+      serializedMemoryWrite {
+        // A cache can omit documents. A clear-all operation must read the server collection.
+        val snapshot = db.collection("users").document(userId).collection("memories").get(Source.SERVER).await()
+        val references = snapshot.documents.filter { document ->
+          val local = localDao.getMemoryByIdAnyUser(document.id)
+          // Preserve a row explicitly re-saved after this clear request was staged.
+          local == null || local.userId != userId || local.pendingDelete
+        }.map { it.reference }
+        references.chunked(450).forEach { chunk ->
+          val batch = db.batch()
+          chunk.forEach { batch.delete(it) }
+          batch.commit().await()
+        }
+        tombstones.forEach { localDao.deleteConfirmedTombstone(it) }
+      }
+      _syncStatus.value = SyncStatus.Synced(System.currentTimeMillis(), localDao.getMemoryCount(userId))
       Result.success(Unit)
     } catch (e: CancellationException) {
       throw e
     } catch (e: Exception) {
+      _syncStatus.value = SyncStatus.Error("Cloud deletion incomplete; local deletion queue retained", e)
       Result.failure(e)
     }
   }
@@ -495,6 +511,16 @@ class DefaultMemoryRepository(
   // --------------------------------------------------------------------------
   // ZERO-LOSS SYNCHRONIZATION ENGINE
   // --------------------------------------------------------------------------
+
+  private suspend fun deleteTombstoneFromFirestore(db: FirebaseFirestore, tombstone: UnifiedMemoryEntity) {
+    serializedMemoryWrite {
+      val current = localDao.getPendingDeleteMemories(tombstone.userId).firstOrNull { it.id == tombstone.id }
+      if (current != tombstone) return@serializedMemoryWrite
+      db.collection("users").document(tombstone.userId).collection("memories").document(tombstone.id)
+        .delete().await()
+      localDao.deleteConfirmedTombstone(tombstone)
+    }
+  }
 
   /**
    * Writes [entity] to `/users/{userId}/memories/{entity.id}` while strictly preserving `createdAt`
@@ -506,25 +532,9 @@ class DefaultMemoryRepository(
     entity: UnifiedMemoryEntity
   ) {
     val docRef = db.collection("users").document(userId).collection("memories").document(entity.id)
-    val existingSnap = try {
-      docRef.get().await()
-    } catch (_: Exception) {
-      null
+    writePreservingCreatedAt(db, docRef, entity.toModel().toMap(), entity.createdAt) {
+      localDao.getMemoryById(entity.id, entity.userId) == entity
     }
-
-    val safeCreatedAtMillis = minOf(entity.createdAt, System.currentTimeMillis())
-    val createdAtValue: Any = if (existingSnap != null && existingSnap.exists()) {
-      existingSnap.getTimestamp("createdAt") ?: Timestamp(Date(safeCreatedAtMillis))
-    } else {
-      Timestamp(Date(safeCreatedAtMillis))
-    }
-
-    val item = entity.toModel()
-    val payload = item.toMap().toMutableMap().apply {
-      put("createdAt", createdAtValue)
-      put("updatedAt", FieldValue.serverTimestamp())
-    }
-    docRef.set(payload).await()
   }
 
   /**
@@ -536,44 +546,11 @@ class DefaultMemoryRepository(
     userId: String,
     remoteItems: List<UnifiedMemoryItem>
   ) = withContext(ioDispatcher) {
-    val dirtyIds = localDao.getDirtyMemories(userId).map { it.id }.toSet()
-    val pendingDeleteIds = localDao.getPendingDeleteMemories(userId).map { it.id }.toSet()
-
-    val cleanEntitiesToUpsert = mutableListOf<UnifiedMemoryEntity>()
-    for (remoteItem in remoteItems) {
-      if (remoteItem.id.isBlank()) continue
-      // Never overwrite a local dirty edit or resurrect a locally tombstoned item
-      if (remoteItem.id in dirtyIds || remoteItem.id in pendingDeleteIds) continue
-
-      val existingLocal = localDao.getMemoryById(remoteItem.id, userId)
-      val remoteEntity = UnifiedMemoryEntity.fromModel(
-        model = remoteItem,
-        isDirty = false,
-        pendingDelete = false
-      )
-      if (existingLocal == null || (!existingLocal.isDirty && remoteEntity.updatedAt >= existingLocal.updatedAt)) {
-        cleanEntitiesToUpsert.add(
-          if (existingLocal != null) {
-            remoteEntity.copy(createdAt = existingLocal.createdAt)
-          } else {
-            remoteEntity
-          }
-        )
-      }
-    }
-
-    if (cleanEntitiesToUpsert.isNotEmpty()) {
-      localDao.insertMemories(cleanEntitiesToUpsert)
-    }
-
-    // Reconcile remote deletions ONLY for clean (`isDirty = 0 AND pendingDelete = 0`) rows
-    val remoteIds = remoteItems.map { it.id }.filter { it.isNotBlank() }
-    if (remoteIds.isNotEmpty()) {
-      localDao.deleteStaleMemories(userId, remoteIds)
-    } else {
-      // If remote collection is completely empty, only remove clean non-dirty rows
-      localDao.deleteStaleMemories(userId, listOf("__no_remote_ids_placeholder__"))
-    }
+    // Ignore malformed/foreign items rather than converting missing timestamps to "now".
+    val remoteEntities = remoteItems
+      .filter { it.id.isNotBlank() && it.userId == userId && it.createdAt != null && it.updatedAt != null }
+      .map { UnifiedMemoryEntity.fromModel(it, isDirty = false, pendingDelete = false) }
+    localDao.mergeRemoteMemories(userId, remoteEntities)
   }
 
   override suspend fun syncRemoteChanges(userId: String): Result<Int> = withContext(ioDispatcher) {
@@ -590,10 +567,7 @@ class DefaultMemoryRepository(
       val pendingDeletes = localDao.getPendingDeleteMemories(userId)
       for (tombstone in pendingDeletes) {
         try {
-          db.collection("users").document(userId).collection("memories").document(tombstone.id)
-            .delete()
-            .await()
-          localDao.deleteMemoryById(tombstone.id, userId)
+          deleteTombstoneFromFirestore(db, tombstone)
         } catch (e: Exception) {
           Log.w(TAG, "Failed to flush tombstone delete ${tombstone.id}; will retry next sync", e)
         }
@@ -604,7 +578,7 @@ class DefaultMemoryRepository(
       for (dirty in dirtyMemories) {
         try {
           pushEntityToFirestorePreservingCreatedAt(db, userId, dirty)
-          localDao.markMemorySynced(dirty.id, userId)
+          localDao.markMemorySyncedIfUnchanged(dirty)
         } catch (e: Exception) {
           Log.w(TAG, "Failed to flush dirty memory ${dirty.id}; keeping local record protected", e)
         }
@@ -616,7 +590,7 @@ class DefaultMemoryRepository(
         .get()
         .await()
 
-      val remoteItems = snapshot.toObjects(UnifiedMemoryItem::class.java)
+      val remoteItems = snapshot.documents.mapNotNull { document -> document.toObject(UnifiedMemoryItem::class.java)?.copy(id = document.id) }
       reconcileRemoteSnapshot(userId, remoteItems)
 
       val totalCount = localDao.getMemoryCount(userId)
@@ -657,7 +631,7 @@ class DefaultMemoryRepository(
         }
 
         if (snapshot != null) {
-          val items = snapshot.toObjects(UnifiedMemoryItem::class.java)
+          val items = snapshot.documents.mapNotNull { document -> document.toObject(UnifiedMemoryItem::class.java)?.copy(id = document.id) }
           repositoryScope.launch {
             try {
               reconcileRemoteSnapshot(userId, items)

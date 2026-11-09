@@ -4,6 +4,7 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Transaction
 import androidx.room.Update
 import kotlinx.coroutines.flow.Flow
 
@@ -139,6 +140,25 @@ interface UnifiedMemoryDao {
   @Query("SELECT * FROM unified_memories WHERE id = :id AND userId = :userId AND pendingDelete = 0 LIMIT 1")
   suspend fun getMemoryById(id: String, userId: String): UnifiedMemoryEntity?
 
+  @Query("SELECT * FROM unified_memories WHERE id = :id LIMIT 1")
+  suspend fun getMemoryByIdAnyUser(id: String): UnifiedMemoryEntity?
+
+  /** Fail without replacing another account's row while the legacy global-id schema is retained. */
+  @Transaction
+  suspend fun saveLocalMemories(memories: List<UnifiedMemoryEntity>) {
+    require(memories.groupBy { it.id }.values.all { rows -> rows.map { it.userId }.distinct().size == 1 }) {
+      "A memory ID cannot belong to multiple local accounts"
+    }
+    memories.forEach { memory ->
+      val existing = getMemoryByIdAnyUser(memory.id)
+      require(existing == null || existing.userId == memory.userId) { "Memory ID belongs to another local account" }
+    }
+    insertMemories(memories.map { memory ->
+      val existing = getMemoryByIdAnyUser(memory.id)
+      memory.copy(createdAt = existing?.createdAt ?: memory.createdAt)
+    })
+  }
+
   @Query("SELECT * FROM unified_memories WHERE userId = :userId AND isDirty = 1 AND pendingDelete = 0 ORDER BY updatedAt ASC")
   suspend fun getDirtyMemories(userId: String): List<UnifiedMemoryEntity>
 
@@ -147,6 +167,56 @@ interface UnifiedMemoryDao {
 
   @Query("UPDATE unified_memories SET isDirty = 0 WHERE id = :id AND userId = :userId")
   suspend fun markMemorySynced(id: String, userId: String)
+
+  /** A completed upload may only acknowledge the exact local revision that was sent. */
+  @Transaction
+  suspend fun markMemorySyncedIfUnchanged(sent: UnifiedMemoryEntity) {
+    if (getMemoryById(sent.id, sent.userId) == sent) {
+      markMemorySynced(sent.id, sent.userId)
+    }
+  }
+
+  /** Keep local-only rows: a cache/query snapshot is never proof of a remote deletion. */
+  @Transaction
+  suspend fun mergeRemoteMemories(userId: String, incoming: List<UnifiedMemoryEntity>) {
+    val tombstones = getPendingDeleteMemories(userId).map { it.id }.toSet()
+    incoming.forEach { remote ->
+      if (remote.userId != userId || remote.id.isBlank() || remote.id in tombstones) return@forEach
+      val local = getMemoryByIdAnyUser(remote.id)
+      if (local != null && local.userId != userId) return@forEach
+      if (local?.isDirty == true) return@forEach
+      if (local == null || remote.updatedAt >= local.updatedAt) {
+        insertMemory(remote.copy(
+          createdAt = local?.createdAt ?: remote.createdAt,
+          isDirty = false,
+          pendingDelete = false
+        ))
+      }
+    }
+  }
+
+  @Transaction
+  suspend fun deleteConfirmedTombstone(sent: UnifiedMemoryEntity) {
+    val current = getPendingDeleteMemories(sent.userId).firstOrNull { it.id == sent.id }
+    if (current == sent) deleteMemoryById(sent.id, sent.userId)
+  }
+
+  @Transaction
+  suspend fun stageMemoryDeletion(prototype: UnifiedMemoryEntity): UnifiedMemoryEntity {
+    val current = getMemoryByIdAnyUser(prototype.id)
+    require(current == null || current.userId == prototype.userId) { "Memory ID belongs to another local account" }
+    val tombstone = (current ?: prototype).copy(
+      pendingDelete = true, isDirty = true, updatedAt = prototype.updatedAt
+    )
+    insertMemory(tombstone)
+    return tombstone
+  }
+
+  @Transaction
+  suspend fun markAllMemoriesPendingDelete(userId: String, updatedAt: Long): List<UnifiedMemoryEntity> {
+    getAllMemories(userId).forEach { markMemoryPendingDelete(it.id, userId, updatedAt) }
+    return getPendingDeleteMemories(userId)
+  }
 
   @Query("UPDATE unified_memories SET pendingDelete = 1, isDirty = 1, updatedAt = :updatedAt WHERE id = :id AND userId = :userId")
   suspend fun markMemoryPendingDelete(id: String, userId: String, updatedAt: Long)

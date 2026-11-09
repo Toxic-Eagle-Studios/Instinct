@@ -2,7 +2,7 @@ package com.example.data.repository
 
 import android.content.Context
 import android.util.Log
-import com.example.R
+import com.example.util.configuredFirestoreDatabaseId
 import com.example.data.local.InstinctDatabase
 import com.example.data.local.UnifiedMemoryEntity
 import com.example.data.model.Fix
@@ -14,18 +14,15 @@ import com.example.util.OperationType
 import com.example.util.handleFirestoreError
 import com.google.firebase.Firebase
 import com.google.firebase.auth.auth
-import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.snapshots
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -50,13 +47,21 @@ class UnifiedMemoryRepository(
   constructor(context: Context) : this(
     context = context.applicationContext,
     db = FirebaseFirestore.getInstance(
-      context.applicationContext.getString(R.string.firestore_database_id)
+      context.configuredFirestoreDatabaseId()
     ),
     localDb = InstinctDatabase.getDatabase(context.applicationContext)
   )
 
   private val auth = Firebase.auth
   private val memoryDao = localDb.unifiedMemoryDao()
+  private val localFirstRepository = DefaultMemoryRepository(context, memoryDao, db, auth)
+
+  private suspend fun mergeRemoteItems(userId: String, items: List<UnifiedMemoryItem>) {
+    val valid = items.filter {
+      it.userId == userId && it.id.isNotBlank() && it.createdAt != null && it.updatedAt != null
+    }
+    memoryDao.mergeRemoteMemories(userId, valid.map { UnifiedMemoryEntity.fromModel(it) })
+  }
 
   fun getCurrentUserId(): String {
     return auth.currentUser?.uid ?: "guest_user"
@@ -76,16 +81,9 @@ class UnifiedMemoryRepository(
           .orderBy("updatedAt", Query.Direction.DESCENDING)
           .snapshots()
           .map { snapshot ->
-            val items = snapshot.toObjects(UnifiedMemoryItem::class.java)
-            // Mirror to local Room cache for instant offline access
-            CoroutineScope(Dispatchers.IO).launch {
-              try {
-                memoryDao.insertMemories(items.map { UnifiedMemoryEntity.fromModel(it) })
-              } catch (e: Exception) {
-                Log.w(TAG, "Cache mirror failed for unified memories", e)
-              }
-            }
-            items
+            val items = snapshot.documents.mapNotNull { document -> document.toObject(UnifiedMemoryItem::class.java)?.copy(id = document.id) }
+            mergeRemoteItems(userId, items)
+            memoryDao.getAllMemories(userId).map { it.toModel() }
           }
           .catch { error ->
             if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
@@ -113,9 +111,10 @@ class UnifiedMemoryRepository(
           .whereEqualTo("type", type)
           .snapshots()
           .map { snapshot ->
-            val items = snapshot.toObjects(UnifiedMemoryItem::class.java)
-              .sortedByDescending { it.updatedAt?.time ?: 0L }
-            items
+            val items = snapshot.documents.mapNotNull { document -> document.toObject(UnifiedMemoryItem::class.java)?.copy(id = document.id) }
+            mergeRemoteItems(userId, items)
+            memoryDao.getAllMemories(userId).filter { it.type == type }
+              .map { it.toModel() }.sortedByDescending { it.updatedAt?.time ?: 0L }
           }
           .catch { error ->
             if (error is Exception) handleFirestoreError(error, OperationType.LIST, path)
@@ -147,11 +146,14 @@ class UnifiedMemoryRepository(
    * Fetch a single memory item by ID
    */
   suspend fun getMemoryById(userId: String, memoryId: String): UnifiedMemoryItem? = withContext(Dispatchers.IO) {
+    memoryDao.getMemoryById(memoryId, userId)?.let { return@withContext it.toModel() }
+    if (memoryDao.getPendingDeleteMemories(userId).any { it.id == memoryId }) return@withContext null
     if (auth.currentUser != null && auth.currentUser?.uid == userId) {
       try {
         val snap = db.collection("users").document(userId).collection("memories").document(memoryId).get().await()
         if (snap.exists()) {
-          return@withContext snap.toObject(UnifiedMemoryItem::class.java)
+          snap.toObject(UnifiedMemoryItem::class.java)?.copy(id = snap.id)?.let { mergeRemoteItems(userId, listOf(it)) }
+          return@withContext memoryDao.getMemoryById(memoryId, userId)?.toModel()
         }
       } catch (e: Exception) {
         Log.w(TAG, "Failed to get memory from Firestore, checking local cache", e)
@@ -167,7 +169,7 @@ class UnifiedMemoryRepository(
     try {
       val uid = getCurrentUserId()
       val memoryId = item.id.ifBlank { UUID.randomUUID().toString() }
-      val existingLocal = memoryDao.getMemoryById(memoryId, uid)
+      val existingLocal = memoryDao.getMemoryByIdAnyUser(memoryId)?.takeIf { it.userId == uid }
       val preservedCreatedAt = existingLocal?.let { Date(it.createdAt) } ?: item.createdAt ?: Date()
       val toSave = item.copy(
         id = memoryId,
@@ -177,24 +179,16 @@ class UnifiedMemoryRepository(
       )
 
       // Save locally first marked dirty (`isDirty = true`) until Firestore write completes
-      memoryDao.insertMemory(UnifiedMemoryEntity.fromModel(toSave, isDirty = true, pendingDelete = false))
+      val entity = UnifiedMemoryEntity.fromModel(toSave, isDirty = true, pendingDelete = false)
+      memoryDao.saveLocalMemories(listOf(entity))
 
       // Sync to Firestore if authenticated
       if (auth.currentUser != null && auth.currentUser?.uid == uid) {
         val docRef = db.collection("users").document(uid).collection("memories").document(memoryId)
-        val existingSnap = try { docRef.get().await() } catch (_: Exception) { null }
-        val safeCreatedMillis = minOf(preservedCreatedAt.time, System.currentTimeMillis())
-        val createdAtValue: Any = if (existingSnap != null && existingSnap.exists()) {
-          existingSnap.getTimestamp("createdAt") ?: com.google.firebase.Timestamp(Date(safeCreatedMillis))
-        } else {
-          com.google.firebase.Timestamp(Date(safeCreatedMillis))
+        writePreservingCreatedAt(db, docRef, toSave.toMap(), preservedCreatedAt.time) {
+          memoryDao.getMemoryById(memoryId, uid) == entity
         }
-        val payload = toSave.toMap().toMutableMap().apply {
-          put("createdAt", createdAtValue)
-          put("updatedAt", FieldValue.serverTimestamp())
-        }
-        docRef.set(payload).await()
-        memoryDao.markMemorySynced(memoryId, uid)
+        memoryDao.markMemorySyncedIfUnchanged(entity)
       }
       Result.success(Unit)
     } catch (e: CancellationException) {
@@ -251,86 +245,20 @@ class UnifiedMemoryRepository(
   /**
    * Toggle completion of a reminder memory
    */
-  suspend fun toggleReminderStatus(memoryId: String, isCompleted: Boolean): Result<Unit> = withContext(Dispatchers.IO) {
-    try {
-      val uid = getCurrentUserId()
-      val local = memoryDao.getMemoryById(memoryId, uid)
-      if (local != null) {
-        val updated = local.copy(isCompleted = isCompleted, updatedAt = System.currentTimeMillis())
-        memoryDao.updateMemory(updated)
-
-        if (auth.currentUser != null && auth.currentUser?.uid == uid) {
-          db.collection("users").document(uid).collection("memories").document(memoryId)
-            .update(
-              mapOf(
-                "isCompleted" to isCompleted,
-                "updatedAt" to FieldValue.serverTimestamp()
-              )
-            )
-            .await()
-        }
-      }
-      Result.success(Unit)
-    } catch (e: CancellationException) {
-      throw e
-    } catch (e: Exception) {
-      Log.e(TAG, "Failed to toggle reminder status in memories", e)
-      Result.failure(e)
-    }
-  }
+  suspend fun toggleReminderStatus(memoryId: String, isCompleted: Boolean): Result<Unit> =
+    localFirstRepository.toggleReminderStatus(getCurrentUserId(), memoryId, isCompleted)
 
   /**
    * Mark an Undo IRL fix as verified working
    */
-  suspend fun verifyFixWorking(memoryId: String, isVerified: Boolean): Result<Unit> = withContext(Dispatchers.IO) {
-    try {
-      val uid = getCurrentUserId()
-      val local = memoryDao.getMemoryById(memoryId, uid)
-      if (local != null) {
-        val updated = local.copy(isVerifiedWorking = isVerified, updatedAt = System.currentTimeMillis())
-        memoryDao.updateMemory(updated)
-
-        if (auth.currentUser != null && auth.currentUser?.uid == uid) {
-          db.collection("users").document(uid).collection("memories").document(memoryId)
-            .update(
-              mapOf(
-                "isVerifiedWorking" to isVerified,
-                "updatedAt" to FieldValue.serverTimestamp()
-              )
-            )
-            .await()
-        }
-      }
-      Result.success(Unit)
-    } catch (e: CancellationException) {
-      throw e
-    } catch (e: Exception) {
-      Log.e(TAG, "Failed to verify fix in memories", e)
-      Result.failure(e)
-    }
-  }
+  suspend fun verifyFixWorking(memoryId: String, isVerified: Boolean): Result<Unit> =
+    localFirstRepository.verifyFixWorking(getCurrentUserId(), memoryId, isVerified)
 
   /**
    * Delete a memory from the shared collection
    */
-  suspend fun deleteMemory(memoryId: String): Result<Unit> = withContext(Dispatchers.IO) {
-    try {
-      val uid = getCurrentUserId()
-      memoryDao.deleteMemoryById(memoryId, uid)
-
-      if (auth.currentUser != null && auth.currentUser?.uid == uid) {
-        db.collection("users").document(uid).collection("memories").document(memoryId)
-          .delete()
-          .await()
-      }
-      Result.success(Unit)
-    } catch (e: CancellationException) {
-      throw e
-    } catch (e: Exception) {
-      Log.e(TAG, "Failed to delete memory item", e)
-      Result.failure(e)
-    }
-  }
+  suspend fun deleteMemory(memoryId: String): Result<Unit> =
+    localFirstRepository.deleteMemoryEntry(getCurrentUserId(), memoryId)
 
   /**
    * Contextual retrieval: given an ongoing activity (e.g., "calling mom", "going to store"),
@@ -370,19 +298,6 @@ class UnifiedMemoryRepository(
   /**
    * Clear all memories for a user
    */
-  suspend fun clearAllMemories(userId: String): Result<Unit> = withContext(Dispatchers.IO) {
-    try {
-      memoryDao.deleteAllByUserId(userId)
-      if (auth.currentUser != null && auth.currentUser?.uid == userId) {
-        val snap = db.collection("users").document(userId).collection("memories").get().await()
-        val batch = db.batch()
-        snap.documents.forEach { batch.delete(it.reference) }
-        batch.commit().await()
-      }
-      Result.success(Unit)
-    } catch (e: Exception) {
-      Log.e(TAG, "Failed to clear memories", e)
-      Result.failure(e)
-    }
-  }
+  suspend fun clearAllMemories(userId: String): Result<Unit> =
+    localFirstRepository.clearAllMemories(userId)
 }

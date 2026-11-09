@@ -16,7 +16,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
     UnifiedMemoryEntity::class
   ],
   version = 5,
-  exportSchema = false
+  exportSchema = true
 )
 @TypeConverters(MemoryTypeConverters::class)
 abstract class InstinctDatabase : RoomDatabase() {
@@ -36,7 +36,8 @@ abstract class InstinctDatabase : RoomDatabase() {
 
     /**
      * Safely inspects `PRAGMA table_info(tableName)` and adds `columnName` if it is not yet present.
-     * Ensures non-destructive, idempotent schema upgrades across all legacy database versions.
+     * Keeps the known legacy upgrades additive and safe to retry.
+     * An unrecognized schema must fail validation rather than erase the user's database.
      */
     internal fun ensureColumnExists(
       db: SupportSQLiteDatabase,
@@ -140,18 +141,21 @@ abstract class InstinctDatabase : RoomDatabase() {
       MIGRATION_4_5
     )
 
-    fun getDatabase(context: Context): InstinctDatabase {
-      return INSTANCE ?: synchronized(this) {
-        val instance = Room.databaseBuilder(
-          context.applicationContext,
-          InstinctDatabase::class.java,
-          "instinct_database"
-        )
-          .addMigrations(*ALL_MIGRATIONS)
-          .build()
-        INSTANCE = instance
-        instance
+    internal fun buildDatabase(
+      context: Context,
+      databaseName: String = "instinct_database"
+    ): InstinctDatabase = Room.databaseBuilder(
+      context.applicationContext,
+      InstinctDatabase::class.java,
+      databaseName
+    )
+      .addMigrations(*ALL_MIGRATIONS)
+      // Memories are user data. Missing migrations and downgrades must never recreate tables.
+      .build()
+
+    fun getDatabase(context: Context): InstinctDatabase =
+      INSTANCE ?: synchronized(this) {
+        INSTANCE ?: buildDatabase(context).also { INSTANCE = it }
       }
-    }
   }
 }

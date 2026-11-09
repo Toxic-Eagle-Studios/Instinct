@@ -2,7 +2,7 @@ package com.example.data.repository
 
 import android.content.Context
 import android.util.Log
-import com.example.R
+import com.example.util.configuredFirestoreDatabaseId
 import com.example.data.local.FixEntity
 import com.example.data.local.InstinctDatabase
 import com.example.data.local.PreferenceEntity
@@ -15,6 +15,7 @@ import com.example.util.handleFirestoreError
 import com.google.firebase.Firebase
 import com.google.firebase.auth.auth
 import com.google.firebase.firestore.FieldValue
+import com.google.firebase.firestore.Source
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.snapshots
 import kotlinx.coroutines.CancellationException
@@ -41,7 +42,7 @@ class InstinctRepository(
   constructor(context: Context) : this(
     context = context.applicationContext,
     db = FirebaseFirestore.getInstance(
-      context.applicationContext.getString(R.string.firestore_database_id)
+      context.configuredFirestoreDatabaseId()
     ),
     localDb = InstinctDatabase.getDatabase(context.applicationContext)
   )
@@ -69,7 +70,7 @@ class InstinctRepository(
         db.collection("users").document(userId).collection("reminders")
           .snapshots()
           .map { snapshot ->
-            val items = snapshot.toObjects(Reminder::class.java)
+            val items = snapshot.documents.mapNotNull { document -> document.toObject(Reminder::class.java)?.copy(id = document.id, userId = userId) }
             // Mirror to local Room database for offline cache
             CoroutineScope(Dispatchers.IO).launch {
               try {
@@ -113,18 +114,9 @@ class InstinctRepository(
       // If signed in, sync to Firestore while preserving immutable createdAt
       if (auth.currentUser != null && auth.currentUser?.uid == uid) {
         val docRef = db.collection("users").document(uid).collection("reminders").document(toSave.id)
-        val existingSnap = try { docRef.get().await() } catch (_: Exception) { null }
-        val safeCreatedMillis = minOf(preservedCreatedAt.time, System.currentTimeMillis())
-        val createdAtValue: Any = if (existingSnap != null && existingSnap.exists()) {
-          existingSnap.getTimestamp("createdAt") ?: com.google.firebase.Timestamp(Date(safeCreatedMillis))
-        } else {
-          com.google.firebase.Timestamp(Date(safeCreatedMillis))
+        writePreservingCreatedAt(db, docRef, toSave.toMap(), preservedCreatedAt.time) {
+          reminderDao.getAllReminders(uid).firstOrNull { it.id == toSave.id } == ReminderEntity.fromModel(toSave)
         }
-        val payload = toSave.toMap().toMutableMap().apply {
-          put("createdAt", createdAtValue)
-          put("updatedAt", FieldValue.serverTimestamp())
-        }
-        docRef.set(payload).await()
       }
 
       // Sync to unified shared memory collection
@@ -211,7 +203,7 @@ class InstinctRepository(
         db.collection("users").document(userId).collection("preferences")
           .snapshots()
           .map { snapshot ->
-            val items = snapshot.toObjects(Preference::class.java)
+            val items = snapshot.documents.mapNotNull { document -> document.toObject(Preference::class.java)?.copy(id = document.id, userId = userId) }
             CoroutineScope(Dispatchers.IO).launch {
               try {
                 preferenceDao.insertPreferences(items.map { PreferenceEntity.fromModel(it) })
@@ -250,18 +242,9 @@ class InstinctRepository(
 
       if (auth.currentUser != null && auth.currentUser?.uid == uid) {
         val docRef = db.collection("users").document(uid).collection("preferences").document(toSave.id)
-        val existingSnap = try { docRef.get().await() } catch (_: Exception) { null }
-        val safeCreatedMillis = minOf(preservedCreatedAt.time, System.currentTimeMillis())
-        val createdAtValue: Any = if (existingSnap != null && existingSnap.exists()) {
-          existingSnap.getTimestamp("createdAt") ?: com.google.firebase.Timestamp(Date(safeCreatedMillis))
-        } else {
-          com.google.firebase.Timestamp(Date(safeCreatedMillis))
+        writePreservingCreatedAt(db, docRef, toSave.toMap(), preservedCreatedAt.time) {
+          preferenceDao.getAllPreferences(uid).firstOrNull { it.id == toSave.id } == PreferenceEntity.fromModel(toSave)
         }
-        val payload = toSave.toMap().toMutableMap().apply {
-          put("createdAt", createdAtValue)
-          put("updatedAt", FieldValue.serverTimestamp())
-        }
-        docRef.set(payload).await()
       }
 
       // Sync to unified shared memory collection
@@ -313,7 +296,7 @@ class InstinctRepository(
         db.collection("users").document(userId).collection("fixes")
           .snapshots()
           .map { snapshot ->
-            val items = snapshot.toObjects(Fix::class.java)
+            val items = snapshot.documents.mapNotNull { document -> document.toObject(Fix::class.java)?.copy(id = document.id, userId = userId) }
             CoroutineScope(Dispatchers.IO).launch {
               try {
                 fixDao.insertFixes(items.map { FixEntity.fromModel(it) })
@@ -352,18 +335,9 @@ class InstinctRepository(
 
       if (auth.currentUser != null && auth.currentUser?.uid == uid) {
         val docRef = db.collection("users").document(uid).collection("fixes").document(toSave.id)
-        val existingSnap = try { docRef.get().await() } catch (_: Exception) { null }
-        val safeCreatedMillis = minOf(preservedCreatedAt.time, System.currentTimeMillis())
-        val createdAtValue: Any = if (existingSnap != null && existingSnap.exists()) {
-          existingSnap.getTimestamp("createdAt") ?: com.google.firebase.Timestamp(Date(safeCreatedMillis))
-        } else {
-          com.google.firebase.Timestamp(Date(safeCreatedMillis))
+        writePreservingCreatedAt(db, docRef, toSave.toMap(), preservedCreatedAt.time) {
+          fixDao.getAllFixes(uid).firstOrNull { it.id == toSave.id } == FixEntity.fromModel(toSave)
         }
-        val payload = toSave.toMap().toMutableMap().apply {
-          put("createdAt", createdAtValue)
-          put("updatedAt", FieldValue.serverTimestamp())
-        }
-        docRef.set(payload).await()
       }
 
       // Sync to unified shared memory collection
@@ -743,37 +717,29 @@ class InstinctRepository(
 
   suspend fun clearAllData(userId: String): Result<Unit> = withContext(Dispatchers.IO) {
     try {
+      // Preserve the unified deletion queue and propagate incomplete cloud deletion to the caller.
+      memoryRepository.clearAllMemories(userId).getOrThrow()
+      if (userId != "guest_user") {
+        check(auth.currentUser?.uid == userId) { "Sign in to finish clearing cloud data" }
+        serializedMemoryWrite {
+          val references = listOf("reminders", "preferences", "fixes").flatMap { collection ->
+            db.collection("users").document(userId).collection(collection).get(Source.SERVER).await()
+              .documents.map { it.reference }
+          }
+          references.chunked(450).forEach { chunk ->
+            val batch = db.batch()
+            chunk.forEach { batch.delete(it) }
+            batch.commit().await()
+          }
+        }
+      }
+      // Retain legacy local payloads when remote clearing fails, so it can be retried.
       reminderDao.deleteAllByUserId(userId)
       preferenceDao.deleteAllByUserId(userId)
       fixDao.deleteAllByUserId(userId)
-
-      try {
-        memoryRepository.clearAllMemories(userId)
-      } catch (e: Exception) {
-        Log.w(TAG, "MemoryRepository clear warning", e)
-      }
-
-      try {
-        unifiedRepository.clearAllMemories(userId)
-      } catch (e: Exception) {
-        Log.w(TAG, "Unified clear warning", e)
-      }
-
-      if (auth.currentUser != null && auth.currentUser?.uid == userId) {
-        // Clear collections in Firestore
-        val batch = db.batch()
-        val remindersSnap = db.collection("users").document(userId).collection("reminders").get().await()
-        remindersSnap.documents.forEach { batch.delete(it.reference) }
-
-        val prefsSnap = db.collection("users").document(userId).collection("preferences").get().await()
-        prefsSnap.documents.forEach { batch.delete(it.reference) }
-
-        val fixesSnap = db.collection("users").document(userId).collection("fixes").get().await()
-        fixesSnap.documents.forEach { batch.delete(it.reference) }
-
-        batch.commit().await()
-      }
       Result.success(Unit)
+    } catch (e: CancellationException) {
+      throw e
     } catch (e: Exception) {
       Log.e(TAG, "Failed to clear all data", e)
       Result.failure(e)

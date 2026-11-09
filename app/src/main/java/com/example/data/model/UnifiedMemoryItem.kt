@@ -1,7 +1,7 @@
 package com.example.data.model
 
-import com.google.firebase.firestore.DocumentId
 import com.google.firebase.firestore.IgnoreExtraProperties
+import com.google.firebase.firestore.PropertyName
 import com.google.firebase.firestore.ServerTimestamp
 import java.util.Date
 import java.util.UUID
@@ -13,7 +13,7 @@ import java.util.UUID
  */
 @IgnoreExtraProperties
 data class UnifiedMemoryItem(
-  @DocumentId val id: String = "",
+  val id: String = "",
   val userId: String = "",
   val type: String = TYPE_REMINDER, // "reminder", "preference", or "fix"
   val title: String = "",
@@ -25,7 +25,7 @@ data class UnifiedMemoryItem(
   val relatedPeople: List<String> = emptyList(),
   val relatedLocations: List<String> = emptyList(),
   val recurrence: String = "every_time", // every_time, next_time_only, until_completed
-  val isCompleted: Boolean = false,
+  @get:PropertyName("isCompleted") val isCompleted: Boolean = false,
 
   // Exactly (Preference fields)
   val category: String = "",
@@ -39,7 +39,7 @@ data class UnifiedMemoryItem(
   val steps: List<String> = emptyList(),
   val toolsNeeded: List<String> = emptyList(),
   val alternativeFix: String = "",
-  val isVerifiedWorking: Boolean = false,
+  @get:PropertyName("isVerifiedWorking") val isVerifiedWorking: Boolean = false,
 
   @ServerTimestamp val createdAt: Date? = null,
   @ServerTimestamp val updatedAt: Date? = null

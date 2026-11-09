@@ -1,13 +1,13 @@
 package com.example.data.model
 
-import com.google.firebase.firestore.DocumentId
 import com.google.firebase.firestore.IgnoreExtraProperties
+import com.google.firebase.firestore.PropertyName
 import com.google.firebase.firestore.ServerTimestamp
 import java.util.Date
 
 @IgnoreExtraProperties
 data class Fix(
-  @DocumentId val id: String = "",
+  val id: String = "",
   val userId: String = "",
   val problemSummary: String = "",
   val whatHappened: String = "",
@@ -15,7 +15,7 @@ data class Fix(
   val steps: List<String> = emptyList(),
   val toolsNeeded: List<String> = emptyList(),
   val alternativeFix: String = "",
-  val isVerifiedWorking: Boolean = false,
+  @get:PropertyName("isVerifiedWorking") val isVerifiedWorking: Boolean = false,
   val category: String = "Personal",
   @ServerTimestamp val createdAt: Date? = null,
   @ServerTimestamp val updatedAt: Date? = null

@@ -8,7 +8,6 @@ import androidx.credentials.CredentialManager
 import androidx.credentials.CustomCredential
 import androidx.credentials.GetCredentialRequest
 import androidx.credentials.exceptions.GetCredentialCancellationException
-import com.example.R
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption
 import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
@@ -51,6 +50,18 @@ class AuthRepository(private val context: Context) {
     return _currentUser.value?.uid ?: "guest_user"
   }
 
+  // Resolve this generated resource at runtime so source builds without publishing
+  // a real google-services.json. Authentication still requires local Firebase setup.
+  private fun configuredWebClientId(): String {
+    val resourceId = context.resources.getIdentifier(
+      "default_web_client_id", "string", context.packageName
+    )
+    check(resourceId != 0) { "Google Sign-In configuration missing: default_web_client_id" }
+    return context.getString(resourceId).also {
+      check(it.isNotBlank()) { "Google Sign-In web client ID is empty" }
+    }
+  }
+
   // Silent Auto-Sign-In on App Startup
   fun attemptAutoSignIn(
     onSuccess: () -> Unit,
@@ -63,7 +74,7 @@ class AuthRepository(private val context: Context) {
     }
 
     val clientId = try {
-      context.getString(R.string.default_web_client_id)
+      configuredWebClientId()
     } catch (e: Exception) {
       Log.w(TAG, "Web client ID not found", e)
       onUnauthenticated()
@@ -108,7 +119,7 @@ class AuthRepository(private val context: Context) {
     scope: CoroutineScope
   ) {
     val clientId = try {
-      context.getString(R.string.default_web_client_id)
+      configuredWebClientId()
     } catch (e: Exception) {
       onError("Google Sign-In configuration missing: default_web_client_id")
       return

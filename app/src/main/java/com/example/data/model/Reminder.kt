@@ -1,13 +1,13 @@
 package com.example.data.model
 
-import com.google.firebase.firestore.DocumentId
 import com.google.firebase.firestore.IgnoreExtraProperties
+import com.google.firebase.firestore.PropertyName
 import com.google.firebase.firestore.ServerTimestamp
 import java.util.Date
 
 @IgnoreExtraProperties
 data class Reminder(
-  @DocumentId val id: String = "",
+  val id: String = "",
   val userId: String = "",
   val title: String = "",
   val triggerActivity: String = "",
@@ -15,7 +15,7 @@ data class Reminder(
   val relatedLocations: List<String> = emptyList(),
   val keywords: List<String> = emptyList(),
   val recurrence: String = "every_time", // every_time, next_time_only, until_completed
-  val isCompleted: Boolean = false,
+  @get:PropertyName("isCompleted") val isCompleted: Boolean = false,
   val category: String = "Personal",
   @ServerTimestamp val createdAt: Date? = null,
   @ServerTimestamp val updatedAt: Date? = null
